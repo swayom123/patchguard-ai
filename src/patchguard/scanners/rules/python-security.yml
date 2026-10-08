@@ -1,0 +1,27 @@
+rules:
+  - id: patchguard.python.subprocess-shell-true
+    languages: [python]
+    message: Explicit shell interpretation in a subprocess call.
+    severity: ERROR
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: ^(run|call|Popen|check_call|check_output)$
+  - id: patchguard.python.dynamic-sql-execute
+    languages: [python]
+    message: Dynamically constructed string passed to a database execution call.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute(f"...")
+          - pattern: $DB.execute("..." % ...)
+          - pattern: $DB.execute("..." + ...)
+  - id: patchguard.python.unsafe-pickle
+    languages: [python]
+    message: Python pickle deserialization.
+    severity: ERROR
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+
