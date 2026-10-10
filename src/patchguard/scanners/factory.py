@@ -1,9 +1,11 @@
 from patchguard.core.config import Settings
+from patchguard.scanners.advisories import LocalAdvisoryScanner
 from patchguard.scanners.bandit import BanditScanner
 from patchguard.scanners.base import ScannerAdapter
 from patchguard.scanners.configuration import ConfigurationScanner
 from patchguard.scanners.custom_python import CustomPythonScanner
 from patchguard.scanners.dependencies import DependencySecurityScanner
+from patchguard.scanners.javascript import JavaScriptSecurityScanner
 from patchguard.scanners.secrets import SecretScanner
 from patchguard.scanners.semgrep import SemgrepScanner
 
@@ -14,7 +16,15 @@ def build_scanners(settings: Settings) -> list[ScannerAdapter]:
             max_files=settings.max_index_files,
             max_file_size_bytes=settings.max_source_file_bytes,
         ),
+        JavaScriptSecurityScanner(
+            max_files=settings.max_index_files,
+            max_file_size_bytes=settings.max_source_file_bytes,
+        ),
         DependencySecurityScanner(),
+        LocalAdvisoryScanner(
+            settings.advisory_database_path,
+            max_age_days=settings.advisory_max_age_days,
+        ),
         ConfigurationScanner(
             max_files=settings.max_index_files,
             max_file_size_bytes=settings.max_source_file_bytes,

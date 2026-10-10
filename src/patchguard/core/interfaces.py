@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
+from patchguard.domain.enums import VerificationStatus
 from patchguard.domain.intelligence import DataFlow, RepositoryIndexResult
 
 
@@ -78,6 +79,7 @@ class VerificationRequest:
 
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
+    status: VerificationStatus
     verified: bool
     checks: tuple[str, ...]
     failure_reason: str | None = None

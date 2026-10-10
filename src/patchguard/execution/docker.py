@@ -13,9 +13,11 @@ from patchguard.domain.scanning import (
 from patchguard.execution.runner import ScannerRunner
 
 _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$")
+_USER_PATTERN = re.compile(r"^[1-9][0-9]*:[0-9]+$")
 _ALLOWED_EXECUTABLES = {
     "bandit": {"bandit"},
     "semgrep": {"semgrep"},
+    "patchguard-verification": {"python"},
 }
 
 
@@ -29,6 +31,8 @@ class DockerScannerRunner(ScannerRunner):
             return self._result(ExecutionStatus.SKIPPED, started, "docker is unavailable")
         if request.image is None:
             return self._result(ExecutionStatus.SKIPPED, started, "scanner image is not configured")
+        if not _USER_PATTERN.fullmatch(request.container_user):
+            return self._result(ExecutionStatus.FAILED, started, "container user is invalid")
         if not _IMAGE_PATTERN.fullmatch(request.image):
             return self._result(ExecutionStatus.FAILED, started, "scanner image is invalid")
         allowed = _ALLOWED_EXECUTABLES.get(request.scanner, set())
@@ -57,7 +61,7 @@ class DockerScannerRunner(ScannerRunner):
             "--security-opt",
             "no-new-privileges",
             "--user",
-            "65534:65534",
+            request.container_user,
             "--read-only",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m,mode=1777",  # noqa: S108

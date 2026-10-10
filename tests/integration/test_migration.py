@@ -12,4 +12,12 @@ def test_migration_upgrades_empty_database(tmp_path: Path, monkeypatch) -> None:
 
     command.upgrade(config, "head")
 
-    assert "security_findings" in inspect(create_engine(f"sqlite:///{database}")).get_table_names()
+    table_names = set(inspect(create_engine(f"sqlite:///{database}")).get_table_names())
+    assert {
+        "security_findings",
+        "security_patch_plans",
+        "patch_workspaces",
+        "patch_applications",
+        "finding_triage_events",
+        "finding_suppressions",
+    } <= table_names

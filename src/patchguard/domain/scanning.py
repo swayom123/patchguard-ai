@@ -25,6 +25,7 @@ class ScannerExecutionRequest:
     output_limit_bytes: int = 5_000_000
     rules_directory: Path | None = None
     success_exit_codes: tuple[int, ...] = (0,)
+    container_user: str = "65534:65534"
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from patchguard.domain.enums import AssessmentClassification, Confidence, Severity
 
@@ -12,3 +12,10 @@ class ModelAssessment(BaseModel):
     reasoning_summary: str = Field(min_length=1, max_length=4_000)
     affected_components: list[str] = Field(default_factory=list, max_length=50)
     recommended_fix: str = Field(min_length=1, max_length=4_000)
+
+
+class ModelPatchProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    diff: str = Field(min_length=1, max_length=30_000)
+    reason: str = Field(min_length=1, max_length=4_000)

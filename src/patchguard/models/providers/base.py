@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 
-from patchguard.domain.analysis import ModelAssessment
+from patchguard.domain.analysis import ModelAssessment, ModelPatchProposal
 
 
 class ModelUnavailableError(RuntimeError):
@@ -17,11 +17,24 @@ class ModelProvider(ABC):
     def complete(self, *, system_instruction: str, repository_context: str) -> ModelAssessment:
         """Return validated structured output from data-only context."""
 
+    def generate_patch(
+        self, *, system_instruction: str, repository_context: str
+    ) -> ModelPatchProposal:
+        """Return a proposed diff; providers may opt in to patch generation."""
+        del system_instruction, repository_context
+        raise ModelUnavailableError("configured model provider does not support patch generation")
+
 
 class DisabledModelProvider(ModelProvider):
     name = "disabled"
     model_name = None
 
     def complete(self, *, system_instruction: str, repository_context: str) -> ModelAssessment:
+        del system_instruction, repository_context
+        raise ModelUnavailableError("no model provider is configured")
+
+    def generate_patch(
+        self, *, system_instruction: str, repository_context: str
+    ) -> ModelPatchProposal:
         del system_instruction, repository_context
         raise ModelUnavailableError("no model provider is configured")

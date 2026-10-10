@@ -67,3 +67,14 @@ class VerificationStatus(StrEnum):
     VERIFIED = "VERIFIED"
     FAILED = "FAILED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
+class PatchWorkspaceStatus(StrEnum):
+    READY_FOR_REVIEW = "READY_FOR_REVIEW"
+
+
+class PatchApplicationStatus(StrEnum):
+    PENDING = "PENDING"
+    APPLIED = "APPLIED"
+    FAILED = "FAILED"
+    ROLLED_BACK = "ROLLED_BACK"

@@ -1,15 +1,18 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from patchguard.domain.enums import (
     AssessmentClassification,
     Confidence,
     FindingStatus,
+    PatchStatus,
+    PatchWorkspaceStatus,
     ScanStatus,
     Severity,
+    VerificationStatus,
 )
 from patchguard.domain.intelligence import IndexStatus, ParseIssueKind, SymbolKind
 
@@ -80,6 +83,49 @@ class FindingResponse(BaseModel):
 class FindingListResponse(BaseModel):
     items: list[FindingResponse]
     total: int = Field(ge=0)
+
+
+class FindingTriageRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    status: FindingStatus
+    note: str = Field(min_length=3, max_length=2_000)
+
+
+class FindingTriageEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    finding_id: str
+    previous_status: FindingStatus
+    new_status: FindingStatus
+    note: str
+    created_at: datetime
+
+
+class FindingSuppressionRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    reason: str = Field(min_length=3, max_length=2_000)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expiration(cls, expires_at: datetime | None) -> datetime | None:
+        if expires_at is not None and (expires_at.tzinfo is None or expires_at.utcoffset() is None):
+            raise ValueError("expires_at must include a timezone")
+        return expires_at.astimezone(UTC) if expires_at is not None else None
+
+
+class FindingSuppressionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    finding_id: str
+    reason: str
+    expires_at: datetime | None
+    created_at: datetime
+    revoked_at: datetime | None
 
 
 class DependencyResponse(BaseModel):
@@ -232,6 +278,66 @@ class AssessmentResponse(BaseModel):
     created_at: datetime
 
 
+class PatchPlanResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    finding_id: str
+    files_to_modify: list[str]
+    strategy: str
+    behavioral_change: str
+    compatibility_risks: list[str]
+    tests_required: list[str]
+    rollback_plan: str
+    context_digest: str
+    created_at: datetime
+
+
+class PatchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    finding_id: str
+    file_path: str
+    operation: str
+    original_hash: str
+    diff: str
+    reason: str
+    status: PatchStatus
+    generated_at: datetime
+
+
+class VerificationRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    patch_id: str
+    status: VerificationStatus
+    sandbox_kind: str
+    network_enabled: bool
+    checks: list[dict[str, Any]]
+    failure_reason: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class PatchWorkspaceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    patch_id: str
+    repository_id: str
+    workspace_path: str
+    source_hash: str
+    status: PatchWorkspaceStatus
+    failure_reason: str | None
+    created_at: datetime
+
+
 class FindingDetailResponse(FindingResponse):
     evidence: list[EvidenceResponse]
     assessments: list[AssessmentResponse] = []
+    patch_plans: list[PatchPlanResponse] = []
+    patches: list[PatchResponse] = []
+    triage_events: list[FindingTriageEventResponse] = []
+    suppressions: list[FindingSuppressionResponse] = []

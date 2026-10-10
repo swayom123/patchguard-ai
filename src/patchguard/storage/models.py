@@ -10,7 +10,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from patchguard.domain.enums import (
     Confidence,
     FindingStatus,
+    PatchApplicationStatus,
     PatchStatus,
+    PatchWorkspaceStatus,
     ScannerRunStatus,
     ScanStatus,
     Severity,
@@ -274,6 +276,9 @@ class SecurityFinding(Base):
     evidence: Mapped[list[Evidence]] = relationship(back_populates="finding")
     patches: Mapped[list[SecurityPatch]] = relationship(back_populates="finding")
     assessments: Mapped[list[SecurityAssessment]] = relationship(back_populates="finding")
+    plans: Mapped[list[SecurityPatchPlan]] = relationship(back_populates="finding")
+    triage_events: Mapped[list[FindingTriageEvent]] = relationship(back_populates="finding")
+    suppressions: Mapped[list[FindingSuppression]] = relationship(back_populates="finding")
 
 
 class SecurityAssessment(Base):
@@ -297,6 +302,55 @@ class SecurityAssessment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     finding: Mapped[SecurityFinding] = relationship(back_populates="assessments")
+
+
+class SecurityPatchPlan(Base):
+    __tablename__ = "security_patch_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    finding_id: Mapped[str] = mapped_column(
+        ForeignKey("security_findings.id"), nullable=False, index=True
+    )
+    files_to_modify: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    strategy: Mapped[str] = mapped_column(Text, nullable=False)
+    behavioral_change: Mapped[str] = mapped_column(Text, nullable=False)
+    compatibility_risks: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    tests_required: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    rollback_plan: Mapped[str] = mapped_column(Text, nullable=False)
+    context_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    finding: Mapped[SecurityFinding] = relationship(back_populates="plans")
+
+
+class FindingTriageEvent(Base):
+    __tablename__ = "finding_triage_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    finding_id: Mapped[str] = mapped_column(
+        ForeignKey("security_findings.id"), nullable=False, index=True
+    )
+    previous_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    new_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    finding: Mapped[SecurityFinding] = relationship(back_populates="triage_events")
+
+
+class FindingSuppression(Base):
+    __tablename__ = "finding_suppressions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    finding_id: Mapped[str] = mapped_column(
+        ForeignKey("security_findings.id"), nullable=False, index=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    finding: Mapped[SecurityFinding] = relationship(back_populates="suppressions")
 
 
 class Evidence(Base):
@@ -333,6 +387,49 @@ class SecurityPatch(Base):
 
     finding: Mapped[SecurityFinding] = relationship(back_populates="patches")
     verification_runs: Mapped[list[VerificationRun]] = relationship(back_populates="patch")
+    workspaces: Mapped[list[PatchWorkspace]] = relationship(back_populates="patch")
+
+
+class PatchWorkspace(Base):
+    __tablename__ = "patch_workspaces"
+    __table_args__ = (UniqueConstraint("patch_id", name="uq_patch_workspace_patch_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    patch_id: Mapped[str] = mapped_column(
+        ForeignKey("security_patches.id"), nullable=False, index=True
+    )
+    repository_id: Mapped[str] = mapped_column(
+        ForeignKey("repositories.id"), nullable=False, index=True
+    )
+    workspace_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=PatchWorkspaceStatus.READY_FOR_REVIEW.value
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    patch: Mapped[SecurityPatch] = relationship(back_populates="workspaces")
+
+
+class PatchApplication(Base):
+    __tablename__ = "patch_applications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    patch_id: Mapped[str] = mapped_column(
+        ForeignKey("security_patches.id"), nullable=False, index=True
+    )
+    worktree_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    backup_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    applied_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=PatchApplicationStatus.PENDING.value
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class VerificationRun(Base):

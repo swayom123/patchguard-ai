@@ -1,23 +1,34 @@
+import ipaddress
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 import uvicorn
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from patchguard.agents.patch_generation import PatchGenerationAgent, PatchGenerationError
+from patchguard.agents.patch_planning import PatchPlanningAgent
 from patchguard.core.config import get_settings
+from patchguard.core.interfaces import VerificationRequest
 from patchguard.core.services import (
     RepositoryIndexService,
     RepositoryService,
     ScanService,
     profile_to_dict,
 )
+from patchguard.domain.enums import FindingStatus, VerificationStatus
 from patchguard.execution.docker import DockerScannerRunner
+from patchguard.findings.lifecycle import FindingLifecycleError, FindingLifecycleService
+from patchguard.models.factory import build_model_provider
+from patchguard.models.providers import ModelUnavailableError
+from patchguard.patching.applications import PatchApplicationError, PatchApplicationService
+from patchguard.patching.workspaces import PatchWorkspaceError, PatchWorkspaceService
 from patchguard.repository.boundary import RepositoryBoundary, RepositoryBoundaryError
 from patchguard.repository.indexer import RepositoryIndexer
-from patchguard.repository.language_adapters import PythonLanguageAdapter
+from patchguard.repository.language_adapters import JavaScriptLanguageAdapter, PythonLanguageAdapter
 from patchguard.repository.scanner import LocalRepositoryScanner
 from patchguard.scanners.factory import build_scanners
 from patchguard.scanners.orchestrator import ScanStateError, SecurityScanOrchestrator
@@ -27,14 +38,18 @@ from patchguard.storage.models import (
     CodeSymbol,
     DependencyRecord,
     Evidence,
+    FindingSuppression,
     ImportRelation,
     IndexParseIssue,
     Repository,
     RepositoryIndex,
     ScannerRun,
     SecurityFinding,
+    SecurityPatch,
     SecurityScan,
+    utc_now,
 )
+from patchguard.verification.service import PatchVerificationService
 
 app = typer.Typer(help="PatchGuard AI defensive security CLI", no_args_is_help=True)
 
@@ -44,12 +59,25 @@ def _session_factory() -> sessionmaker[Session]:
     return create_session_factory(create_database_engine(settings.database_url))
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").split("%", maxsplit=1)[0]
+    if normalized.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Bind address")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Bind port")] = 8000,
 ) -> None:
     """Start the PatchGuard API."""
+    settings = get_settings()
+    if not _is_loopback_host(host) and settings.api_auth_token is None:
+        raise typer.BadParameter("binding beyond loopback requires PATCHGUARD_API_AUTH_TOKEN")
     uvicorn.run("patchguard.apps.api.main:app", host=host, port=port)
 
 
@@ -160,8 +188,10 @@ def findings(
     category: Annotated[str | None, typer.Option()] = None,
     scanner: Annotated[str | None, typer.Option()] = None,
     severity: Annotated[str | None, typer.Option()] = None,
+    status: Annotated[str | None, typer.Option()] = None,
+    include_suppressed: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    """List real persisted findings; Phase 1 normally returns none."""
+    """List persisted findings, excluding actively suppressed items by default."""
     factory = _session_factory()
     with factory() as session:
         statement = select(SecurityFinding)
@@ -173,14 +203,42 @@ def findings(
             statement = statement.where(SecurityFinding.scanner.contains(scanner))
         if severity:
             statement = statement.where(SecurityFinding.severity == severity.upper())
+        if status:
+            try:
+                finding_status = FindingStatus(status.upper())
+            except ValueError as exc:
+                raise typer.BadParameter("unknown finding status") from exc
+            statement = statement.where(SecurityFinding.status == finding_status.value)
+        if not include_suppressed:
+            now = utc_now()
+            active_suppressions = select(FindingSuppression.finding_id).where(
+                FindingSuppression.revoked_at.is_(None),
+                or_(FindingSuppression.expires_at.is_(None), FindingSuppression.expires_at > now),
+            )
+            statement = statement.where(~SecurityFinding.id.in_(active_suppressions))
         records = list(session.scalars(statement))
         if not records:
-            typer.echo("No confirmed findings.")
+            typer.echo("No findings.")
             return
+        suppressed_ids: set[str] = set()
+        if include_suppressed:
+            now = utc_now()
+            suppressed_ids = set(
+                session.scalars(
+                    select(FindingSuppression.finding_id).where(
+                        FindingSuppression.revoked_at.is_(None),
+                        or_(
+                            FindingSuppression.expires_at.is_(None),
+                            FindingSuppression.expires_at > now,
+                        ),
+                    )
+                )
+            )
         for finding in records:
+            suppression_label = " [SUPPRESSED]" if finding.id in suppressed_ids else ""
             typer.echo(
                 f"{finding.id} {finding.severity} {finding.title} "
-                f"{finding.file_path}:{finding.line_start}"
+                f"{finding.file_path}:{finding.line_start}{suppression_label}"
             )
 
 
@@ -221,6 +279,238 @@ def finding_detail(finding_id: Annotated[str, typer.Argument()]) -> None:
             typer.echo(f"- {evidence.scanner} {evidence.rule_id}: {evidence.summary}")
 
 
+@app.command("triage-finding")
+def triage_finding(
+    finding_id: Annotated[str, typer.Argument()],
+    status: Annotated[str, typer.Argument()],
+    note: Annotated[str, typer.Option(help="Reason for this status change")],
+) -> None:
+    """Change a finding's triage status and record the operator's rationale."""
+    try:
+        finding_status = FindingStatus(status.upper())
+    except ValueError as exc:
+        raise typer.BadParameter("unknown finding status") from exc
+    with _session_factory()() as session:
+        try:
+            event = FindingLifecycleService(session).triage(finding_id, finding_status, note)
+        except FindingLifecycleError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if event is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{event.id} {event.previous_status} -> {event.new_status}")
+
+
+@app.command("suppress-finding")
+def suppress_finding(
+    finding_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option(help="Why the finding is suppressed")],
+    expires_at: Annotated[
+        str | None,
+        typer.Option(help="Optional timezone-aware ISO-8601 expiry, e.g. 2027-01-01T00:00:00Z"),
+    ] = None,
+) -> None:
+    """Suppress a finding with an audit reason and optional expiry."""
+    expiration = None
+    if expires_at is not None:
+        try:
+            expiration = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise typer.BadParameter("expiry must be an ISO-8601 timestamp") from exc
+    with _session_factory()() as session:
+        try:
+            suppression = FindingLifecycleService(session).suppress(finding_id, reason, expiration)
+        except FindingLifecycleError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if suppression is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{suppression.id} expires={suppression.expires_at or 'never'}")
+
+
+@app.command("unsuppress-finding")
+def unsuppress_finding(finding_id: Annotated[str, typer.Argument()]) -> None:
+    """Revoke the active suppression for a finding."""
+    with _session_factory()() as session:
+        try:
+            suppression = FindingLifecycleService(session).unsuppress(finding_id)
+        except FindingLifecycleError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if suppression is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{suppression.id} revoked")
+
+
+@app.command("plan-patch")
+def plan_patch(finding_id: Annotated[str, typer.Argument()]) -> None:
+    """Create a review-only patch plan for a persisted finding."""
+    factory = _session_factory()
+    with factory() as session:
+        plan = PatchPlanningAgent(session).plan(finding_id)
+        if plan is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(
+            json.dumps(
+                {
+                    "id": plan.id,
+                    "finding_id": plan.finding_id,
+                    "files_to_modify": plan.files_to_modify,
+                    "strategy": plan.strategy,
+                    "behavioral_change": plan.behavioral_change,
+                    "compatibility_risks": plan.compatibility_risks,
+                    "tests_required": plan.tests_required,
+                    "rollback_plan": plan.rollback_plan,
+                    "context_digest": plan.context_digest,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
+
+@app.command("generate-patch")
+def generate_patch(finding_id: Annotated[str, typer.Argument()]) -> None:
+    """Generate and store a proposed diff without applying it."""
+    settings = get_settings()
+    factory = _session_factory()
+    with factory() as session:
+        generator = PatchGenerationAgent(
+            session,
+            build_model_provider(settings),
+            RepositoryBoundary(settings.allowed_repository_roots),
+            context_limit_chars=settings.model_context_limit_chars,
+            max_source_file_bytes=settings.max_source_file_bytes,
+        )
+        try:
+            patch = generator.generate(finding_id)
+        except (ModelUnavailableError, PatchGenerationError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if patch is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{patch.id} {patch.status} {patch.file_path} sha256={patch.original_hash}")
+
+
+@app.command("verify-patch")
+def verify_patch(patch_id: Annotated[str, typer.Argument()]) -> None:
+    """Verify a proposed patch in an isolated, networkless Docker container."""
+    settings = get_settings()
+    factory = _session_factory()
+    with factory() as session:
+        patch = session.get(SecurityPatch, patch_id)
+        if patch is None:
+            typer.echo("patch not found", err=True)
+            raise typer.Exit(code=1)
+        finding = session.get(SecurityFinding, patch.finding_id)
+        if finding is None:
+            typer.echo("finding not found", err=True)
+            raise typer.Exit(code=1)
+        verifier = PatchVerificationService(
+            session,
+            RepositoryBoundary(settings.allowed_repository_roots),
+            DockerScannerRunner(),
+            image=settings.verification_image,
+            timeout_seconds=settings.verification_timeout_seconds,
+            output_limit_bytes=settings.verification_output_limit_bytes,
+            max_files=settings.max_index_files,
+            max_workspace_bytes=settings.max_verification_workspace_bytes,
+            max_source_file_bytes=settings.max_source_file_bytes,
+        )
+        run = verifier.verify(
+            VerificationRequest(patch_id=patch.id, repository_id=finding.repository_id)
+        )
+        if run is None:
+            typer.echo("patch could not be found for the repository", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{run.id} {run.status}")
+        if run.status != VerificationStatus.VERIFIED.value:
+            typer.echo(run.failure_reason or "verification requires review", err=True)
+
+
+@app.command("patch-workspace")
+def patch_workspace(patch_id: Annotated[str, typer.Argument()]) -> None:
+    """Create a separate review workspace for a verified patch."""
+    settings = get_settings()
+    factory = _session_factory()
+    with factory() as session:
+        service = PatchWorkspaceService(
+            session,
+            RepositoryBoundary(settings.allowed_repository_roots),
+            workspace_root=settings.patch_workspace_root,
+            max_files=settings.max_index_files,
+            max_workspace_bytes=settings.max_verification_workspace_bytes,
+            max_source_file_bytes=settings.max_source_file_bytes,
+        )
+        try:
+            workspace = service.create(patch_id)
+        except PatchWorkspaceError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if workspace is None:
+            typer.echo("patch not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{workspace.id} {workspace.status} {workspace.workspace_path}")
+
+
+@app.command("apply-patch")
+def apply_patch(
+    patch_id: Annotated[str, typer.Argument()],
+    worktree: Annotated[Path, typer.Option(help="Authorized linked worktree to modify")],
+    confirm: Annotated[str, typer.Option(help="Must exactly match PATCH_ID")],
+) -> None:
+    """Apply a verified patch to a separate linked worktree after explicit confirmation."""
+    settings = get_settings()
+    factory = _session_factory()
+    with factory() as session:
+        service = PatchApplicationService(
+            session,
+            RepositoryBoundary(settings.allowed_repository_roots),
+            backup_root=settings.patch_workspace_root,
+            max_source_file_bytes=settings.max_source_file_bytes,
+        )
+        try:
+            application = service.apply(patch_id, worktree, confirm)
+        except PatchApplicationError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if application is None:
+            typer.echo("patch not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(
+            f"{application.id} {application.status} {application.file_path} "
+            f"backup={application.backup_path}"
+        )
+
+
+@app.command("rollback-patch")
+def rollback_patch(application_id: Annotated[str, typer.Argument()]) -> None:
+    """Restore the guarded backup if the applied target has not changed since application."""
+    settings = get_settings()
+    factory = _session_factory()
+    with factory() as session:
+        service = PatchApplicationService(
+            session,
+            RepositoryBoundary(settings.allowed_repository_roots),
+            backup_root=settings.patch_workspace_root,
+            max_source_file_bytes=settings.max_source_file_bytes,
+        )
+        try:
+            application = service.rollback(application_id)
+        except PatchApplicationError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if application is None:
+            typer.echo("application not found", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{application.id} {application.status} {application.file_path}")
+
+
 @app.command("repositories")
 def repositories() -> None:
     """List registered repositories."""
@@ -252,7 +542,10 @@ def index_repository(repository_id: Annotated[str, typer.Argument()]) -> None:
             session,
             RepositoryBoundary(settings.allowed_repository_roots),
             RepositoryIndexer(
-                [PythonLanguageAdapter(max_file_size_bytes=settings.max_source_file_bytes)],
+                [
+                    PythonLanguageAdapter(max_file_size_bytes=settings.max_source_file_bytes),
+                    JavaScriptLanguageAdapter(max_file_size_bytes=settings.max_source_file_bytes),
+                ],
                 max_files=settings.max_index_files,
             ),
         )

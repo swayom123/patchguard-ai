@@ -8,4 +8,6 @@ Phase 4 adds three read-only, in-process adapters. They parse repository files a
 
 Dependency inventory is stored against a scan in `dependency_records` and exposed through `GET /scans/{scan_id}/dependencies` and `patchguard dependencies <scan-id>`. Finding lists now support category, scanner, CWE, severity, and confidence filters.
 
-Optional third-party advisory scanning remains disabled. Any future `pip-audit` integration must require a pre-approved local Docker image with offline advisory data, retain network isolation, and never invoke host package tooling.
+Third-party advisory scanning is still not invoked. Phase 13 adds a separate matcher for a reviewed
+local JSON snapshot; see [the advisory schema](advisory-database.md). No package manager, Docker
+image, or network access is used for this matcher.

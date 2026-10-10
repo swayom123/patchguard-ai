@@ -144,10 +144,10 @@ def test_supports_declared_python_source_encoding(tmp_path: Path) -> None:
 def test_reports_unsupported_source_language_explicitly(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
-    (repository / "index.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    (repository / "index.java").write_text("class Example {}\n", encoding="utf-8")
 
     result = RepositoryIndexer([PythonLanguageAdapter()]).index(repository)
 
     assert result.files == ()
     assert result.issues[0].kind == ParseIssueKind.UNSUPPORTED_LANGUAGE
-    assert "TypeScript" in result.issues[0].message
+    assert "Java" in result.issues[0].message

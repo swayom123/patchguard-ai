@@ -5,7 +5,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from patchguard.domain.analysis import ModelAssessment
+from patchguard.domain.analysis import ModelAssessment, ModelPatchProposal
 from patchguard.models.providers.base import ModelProvider, ModelUnavailableError
 
 
@@ -19,7 +19,7 @@ class OpenAICompatibleProvider(ModelProvider):
         self._api_key = api_key
         self.model_name = model_name
 
-    def complete(self, *, system_instruction: str, repository_context: str) -> ModelAssessment:
+    def _request_json(self, *, system_instruction: str, repository_context: str) -> str:
         body = json.dumps(
             {
                 "model": self.model_name,
@@ -41,9 +41,36 @@ class OpenAICompatibleProvider(ModelProvider):
         )
         try:
             with urlopen(request, timeout=30) as response:  # noqa: S310 - scheme validated above
-                payload = json.loads(response.read())
-            return ModelAssessment.model_validate_json(payload["choices"][0]["message"]["content"])
+                payload = json.loads(response.read(100_001))
+            content = payload["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or len(content) > 100_000:
+                raise ValueError("provider response exceeds limit")
+            return content
         except (KeyError, TypeError, ValueError, URLError, OSError) as exc:
             raise ModelUnavailableError(
+                "configured model provider did not return valid structured output"
+            ) from exc
+
+    def complete(self, *, system_instruction: str, repository_context: str) -> ModelAssessment:
+        content = self._request_json(
+            system_instruction=system_instruction, repository_context=repository_context
+        )
+        try:
+            return ModelAssessment.model_validate_json(content)
+        except ValueError as exc:
+            raise ModelUnavailableError(
                 "configured model provider did not return a valid assessment"
+            ) from exc
+
+    def generate_patch(
+        self, *, system_instruction: str, repository_context: str
+    ) -> ModelPatchProposal:
+        content = self._request_json(
+            system_instruction=system_instruction, repository_context=repository_context
+        )
+        try:
+            return ModelPatchProposal.model_validate_json(content)
+        except ValueError as exc:
+            raise ModelUnavailableError(
+                "configured model provider did not return a valid patch proposal"
             ) from exc

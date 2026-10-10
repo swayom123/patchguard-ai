@@ -174,6 +174,7 @@ class SecurityScanOrchestrator:
                 line_end=max(candidate.line_start, candidate.line_end),
                 code_reference=f"{normalized_path}:{candidate.line_start}",
                 evidence_summary=candidate.evidence_summary,
+                evidence_details=candidate.evidence_details,
             )
             fingerprint = finding_fingerprint(normalized)
             finding = self._session.scalar(
